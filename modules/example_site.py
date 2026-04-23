@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import time
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from core.logger import get_logger
@@ -158,35 +157,6 @@ class ExampleSiteBot:
     # Login
     # ------------------------------------------------------------------
 
-    async def _debug_capture(self, label: str):
-        """Sauvegarde un screenshot et le HTML de la page pour diagnostiquer les échecs."""
-        ts = int(time.time())
-        try:
-            shot = f"/tmp/debug_{label}_{ts}.png"
-            await self.page.screenshot(path=shot, full_page=True)
-            log.error("Screenshot sauvegardé : %s", shot)
-        except Exception as e:
-            log.error("Screenshot impossible : %s", e)
-        try:
-            html_path = f"/tmp/debug_{label}_{ts}.html"
-            content = await self.page.content()
-            with open(html_path, "w") as f:
-                f.write(content)
-            log.error("HTML page sauvegardé : %s", html_path)
-            # Lister les inputs trouvés dans la page pour aider au debug
-            inputs = await self.page.evaluate("""
-                () => Array.from(document.querySelectorAll('input')).map(el => ({
-                    type: el.type, name: el.name,
-                    autocomplete: el.autocomplete,
-                    'data-qa': el.getAttribute('data-qa'),
-                    placeholder: el.placeholder,
-                    visible: el.offsetParent !== null
-                }))
-            """)
-            log.error("Inputs trouvés dans la page : %s", inputs)
-        except Exception as e:
-            log.error("Dump HTML impossible : %s", e)
-
     async def _find_and_fill(self, selectors: list[str], value: str, per_selector_timeout: int = 5000):
         for selector in selectors:
             try:
@@ -197,8 +167,6 @@ class ExampleSiteBot:
                 return
             except PlaywrightTimeoutError:
                 continue
-
-        await self._debug_capture("login_form")
         raise RuntimeError(f"Aucun champ de saisie trouvé parmi : {', '.join(selectors)}")
 
     async def ensure_logged_in(self, username: str, password: str, date_of_birth: str):
