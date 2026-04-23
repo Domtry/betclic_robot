@@ -1,0 +1,7 @@
+.venv
+.env
+__pycache__
+*.py[oc]
+user_data/
+cookies.json
+.git
