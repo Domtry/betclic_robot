@@ -9,7 +9,7 @@ class BrowserManager:
         self.playwright = await async_playwright().start()
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir="user_data",
-            headless=False
+            headless=True
         )
 
     async def new_page(self):
