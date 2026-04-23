@@ -1,7 +1,9 @@
 from playwright.async_api import async_playwright
+import os
 
 class BrowserManager:
     def __init__(self):
+        self.chromium_flags = os.getenv("CHROMIUM_FLAGS", "")
         self.playwright = None
         self.context = None
 
@@ -9,7 +11,8 @@ class BrowserManager:
         self.playwright = await async_playwright().start()
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir="user_data",
-            headless=True
+            headless=True,
+            args=self.chromium_flags.split(" ")
         )
 
     async def new_page(self):
