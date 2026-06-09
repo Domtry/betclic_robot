@@ -1,6 +1,11 @@
 from playwright.async_api import async_playwright
 import os
 
+# Force headless=new to avoid "Multiple targets are not supported in headless mode" error
+# in Chromium >= 109 with remote-debugging-pipe (used by Playwright persistent contexts).
+os.environ.setdefault("PLAYWRIGHT_CHROMIUM_USE_HEADLESS_NEW", "1")
+
+
 class BrowserManager:
     def __init__(self):
         self.chromium_flags = os.getenv("CHROMIUM_FLAGS", "")
@@ -9,10 +14,12 @@ class BrowserManager:
 
     async def start(self):
         self.playwright = await async_playwright().start()
+        args = self.chromium_flags.split(" ") if self.chromium_flags else []
+        args.append("--headless=new")
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir="user_data",
             headless=True,
-            args=self.chromium_flags.split(" ")
+            args=args,
         )
 
     async def new_page(self):

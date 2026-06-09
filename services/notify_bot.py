@@ -21,11 +21,12 @@ class TelegramNotifier:
 
     async def envoyer(self, message: str):
         log.info("Envoi de la notification Telegram...")
-        await self._client.post(self.url, json={
+        response = await self._client.post(self.url, json={
             "chat_id": self.chat_id,
             "text": message,
             "parse_mode": "HTML"
         })
+        response.raise_for_status()
         log.info("Notification envoyée")
 
     async def close(self):

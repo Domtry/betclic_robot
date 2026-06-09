@@ -14,8 +14,8 @@ class SessionExpiredError(Exception):
 
 class ExampleSiteBot:
     COOKIES_PATH = "cookies.json"
-    BASE_URL = "https://www.betclic.ci/casino/"
-    LOGIN_URL = f"{BASE_URL}/connexion"
+    BASE_URL = "https://www.betclic.fr/"
+    LOGIN_URL = f"{BASE_URL}connexion"
 
     _JS_GET_MULTIPLIERS = """
         () => {
@@ -145,27 +145,60 @@ class ExampleSiteBot:
     async def _is_logged_in(self) -> bool:
         log.info("Vérification de la session sur %s", self.BASE_URL)
         await self.page.goto(self.BASE_URL, wait_until="domcontentloaded")
-        try:
-            await self.page.locator("text=Connexion").wait_for(state="visible", timeout=3000)
-            log.info("Non connecté (bouton Connexion visible)")
-            return False
-        except PlaywrightTimeoutError:
-            log.info("Session active confirmée")
-            return True
+        await self.page.wait_for_timeout(2000)
+
+        # Check multiple indicators: absence of login button AND presence of logout/account
+        is_logged_in = await self.page.evaluate("""() => {
+            const body = document.body.innerText;
+            const hasConnexion = body.includes('Connexion');
+            const hasDeconnexion = body.includes('Déconnexion') || body.includes('deconnexion');
+            const hasMonCompte = body.includes('Mon compte') || body.includes('Mon profil');
+            // Return true only if we see logged-in indicators OR definitively no login button
+            return {
+                hasConnexion,
+                hasDeconnexion,
+                hasMonCompte,
+            };
+        }""")
+
+        logged_in = (
+            is_logged_in.get("hasDeconnexion") or
+            is_logged_in.get("hasMonCompte") or
+            not is_logged_in.get("hasConnexion")
+        )
+
+        if logged_in:
+            log.info("Session active confirmée (déconnexion=%s, monCompte=%s, connexion=%s)",
+                     is_logged_in.get("hasDeconnexion"),
+                     is_logged_in.get("hasMonCompte"),
+                     is_logged_in.get("hasConnexion"))
+        else:
+            log.info("Non connecté (bouton Connexion visible, aucun indicateur de session active)")
+
+        return logged_in
 
     # ------------------------------------------------------------------
     # Login
     # ------------------------------------------------------------------
 
-    async def _find_and_fill(self, selectors: list[str], value: str, per_selector_timeout: int = 5000):
+    async def _find_and_fill(self, selectors: list[str], value: str, per_selector_timeout: int = 8000):
+        """Essaye chaque sélecteur avec retries pour absorber les re-renders Angular."""
         for selector in selectors:
             try:
                 el = self.page.locator(selector).first
                 await el.wait_for(state="visible", timeout=per_selector_timeout)
+                await el.click()  # focus avant fill (Angular aime le focus)
                 await el.fill(value)
-                log.debug("Champ rempli via sélecteur : %s", selector)
-                return
+                # Vérifier que la valeur a bien été saisie (Angular two-way binding)
+                actual = await el.input_value()
+                if actual:
+                    log.debug("Champ rempli via sélecteur : %s", selector)
+                    return
+                log.debug("Fill sur %s n'a pas pris, réessai...", selector)
             except PlaywrightTimeoutError:
+                continue
+            except Exception as e:
+                log.debug("Erreur sur sélecteur %s : %s", selector, e)
                 continue
         raise RuntimeError(f"Aucun champ de saisie trouvé parmi : {', '.join(selectors)}")
 
@@ -183,15 +216,45 @@ class ExampleSiteBot:
             log.info("Navigation vers la page de connexion")
             await self.page.goto(self.LOGIN_URL, wait_until="domcontentloaded")
 
-            try:
-                await self.page.locator("text=Tout accepter").click(timeout=5000)
-                await self.page.wait_for_timeout(300)
-                log.info("Bannière cookies fermée")
-            except PlaywrightTimeoutError:
-                log.debug("Pas de bannière cookies")
+            # Vérifier qu'on n'a pas été redirigés vers le .fr (ancien bug .ci)
+            if "betclic.fr" in self.page.url and "betclic.ci" not in self.LOGIN_URL:
+                log.info("Redirection .ci -> .fr détectée, poursuite sur .fr")
+            elif "betclic.ci" in self.page.url:
+                log.warning("Toujours sur .ci — tentative de navigation directe vers .fr")
+                self.LOGIN_URL = "https://www.betclic.fr/connexion"
+                await self.page.goto(self.LOGIN_URL, wait_until="domcontentloaded")
 
+            # --- Bannière cookies (tc-privacy-banner Angular) ---
+            # Sélecteurs multiples car le texte exact varie
+            cookie_selectors = [
+                "button:has-text(\"Tout accepter\")",
+                "button:has-text(\"Accepter\")",
+                "button:has-text(\"Accepter tout\")",
+                "button:has-text(\"J'accepte\")",
+                "#privacy-cookie-banner button.accept",
+                "[class*=privacy] button[class*=accept]",
+                "[class*=consent] button[class*=accept]",
+            ]
+            cookie_closed = False
+            for cs in cookie_selectors:
+                try:
+                    await self.page.locator(cs).first.click(timeout=3000)
+                    await self.page.wait_for_timeout(500)
+                    log.info("Bannière cookies fermée via : %s", cs)
+                    cookie_closed = True
+                    break
+                except Exception:
+                    continue
+            if not cookie_closed:
+                log.debug("Pas de bannière cookies détectée ou déjà acceptée")
+
+            # --- Attendre qu'Angular ait fini de rendre le formulaire ---
             log.info("Attente du formulaire de connexion...")
-            await self.page.wait_for_load_state("networkidle")
+            # Fixe un délai minimum pour laisser Angular bootstraper
+            await self.page.wait_for_timeout(2000)
+            # Attendre que le champ username soit visible (plus fiable que networkidle)
+            username_field = self.page.locator('input[autocomplete="username"]').first
+            await username_field.wait_for(state="visible", timeout=15000)
 
             log.info("Remplissage de l'identifiant")
             await self._find_and_fill(self._USERNAME_SELECTORS, username)
@@ -221,8 +284,22 @@ class ExampleSiteBot:
     # ------------------------------------------------------------------
 
     async def open_game(self, game_url: str):
+        # Fix old .ci URLs that redirect to .fr homepage
+        if "betclic.ci" in game_url:
+            fixed_url = game_url.replace("betclic.ci", "betclic.fr")
+            log.info("URL .ci détectée — redirigeant vers : %s", fixed_url)
+            game_url = fixed_url
+
         log.info("Navigation vers le jeu : %s", game_url)
         await self.page.goto(game_url, wait_until="domcontentloaded")
+
+        # If redirected to homepage, the session is probably expired or game is unavailable
+        if self.page.url.rstrip("/") == "https://www.betclic.fr":
+            log.warning("Redirection vers la page d'accueil — session expirée ou jeu indisponible")
+            raise SessionExpiredError(
+                f"Redirigé vers l'accueil depuis {game_url} — reconnexion nécessaire"
+            )
+
         await self._handle_game_launch_sequence()
         await self._wait_for_game_ready()
         log.info("Jeu chargé et prêt")

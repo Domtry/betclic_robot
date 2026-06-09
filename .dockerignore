@@ -4,4 +4,6 @@ __pycache__
 *.py[oc]
 user_data/
 cookies.json
+data/
+reports/
 .git

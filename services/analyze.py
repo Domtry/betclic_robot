@@ -13,8 +13,20 @@ WIN_RATE  = 10
 #  ANALYSE — retourne un seul dictionnaire
 # ============================================================
 def analyze(data) -> dict:
-    values = [d['value'] for d in data]
+    values = [float(d['value']) for d in data if d.get('value') is not None]
     n = len(values)
+
+    if n == 0:
+        return {
+            'is_valid': False,
+            'nombre_total': 0,
+            'dernier_multiplicateur': None,
+            'taux_gains_faibles': "0%",
+            'taux_gains_moyens': "0%",
+            'taux_gains_elevés': "0%",
+            'tendance_recente': "INCONNUE",
+            'historique_recent': [],
+        }
  
     pct_high = round(sum(1 for v in values if v >= 2.0)       / n * 100, 1)
     pct_mid  = round(sum(1 for v in values if 1.5 <= v < 2.0) / n * 100, 1)
@@ -28,6 +40,7 @@ def analyze(data) -> dict:
     else:              tendance = "STABLE"
  
     return {
+        'is_valid': True,
         'nombre_total': n,
         'dernier_multiplicateur': values[0],
 
@@ -47,7 +60,14 @@ def generate_mise(analysis: dict) -> dict:
     cote = 0
     mise = 0
     
-    historic = analysis['historique_recent']
+    historic = analysis.get('historique_recent', [])
+    if not analysis.get('is_valid', True) or len(historic) < WIN_SHORT:
+        return {
+            "cote": 0,
+            "mise": 0,
+            "is_ready": False,
+        }
+
     if analysis['tendance_recente'] == 'BAISSE' :
         variance = min(historic)
         if variance > 1.3:
