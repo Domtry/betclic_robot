@@ -29,6 +29,17 @@ class TelegramNotifier:
         response.raise_for_status()
         log.info("Notification envoyée")
 
+    async def envoyer_photo(self, image_bytes: bytes, caption: str = ""):
+        photo_url = self.url.replace("/sendMessage", "/sendPhoto")
+        log.info("Envoi du graphe Telegram...")
+        response = await self._client.post(
+            photo_url,
+            data={"chat_id": self.chat_id, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": ("chart.png", image_bytes, "image/png")},
+        )
+        response.raise_for_status()
+        log.info("Graphe envoyé")
+
     async def close(self):
         await self._client.aclose()
         log.debug("Client HTTP Telegram fermé")

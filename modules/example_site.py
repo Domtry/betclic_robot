@@ -14,7 +14,7 @@ class SessionExpiredError(Exception):
 
 class ExampleSiteBot:
     COOKIES_PATH = "cookies.json"
-    BASE_URL = "https://www.betclic.fr/"
+    BASE_URL = "https://www.betclic.ci/"
     LOGIN_URL = f"{BASE_URL}connexion"
 
     _JS_GET_MULTIPLIERS = """
@@ -220,8 +220,8 @@ class ExampleSiteBot:
             if "betclic.fr" in self.page.url and "betclic.ci" not in self.LOGIN_URL:
                 log.info("Redirection .ci -> .fr détectée, poursuite sur .fr")
             elif "betclic.ci" in self.page.url:
-                log.warning("Toujours sur .ci — tentative de navigation directe vers .fr")
-                self.LOGIN_URL = "https://www.betclic.fr/connexion"
+                log.warning("Toujours sur .ci — tentative de navigation directe vers .ci")
+                self.LOGIN_URL = "https://www.betclic.ci/casino/connexion"
                 await self.page.goto(self.LOGIN_URL, wait_until="domcontentloaded")
 
             # --- Bannière cookies (tc-privacy-banner Angular) ---
@@ -284,17 +284,12 @@ class ExampleSiteBot:
     # ------------------------------------------------------------------
 
     async def open_game(self, game_url: str):
-        # Fix old .ci URLs that redirect to .fr homepage
-        if "betclic.ci" in game_url:
-            fixed_url = game_url.replace("betclic.ci", "betclic.fr")
-            log.info("URL .ci détectée — redirigeant vers : %s", fixed_url)
-            game_url = fixed_url
-
         log.info("Navigation vers le jeu : %s", game_url)
         await self.page.goto(game_url, wait_until="domcontentloaded")
 
         # If redirected to homepage, the session is probably expired or game is unavailable
-        if self.page.url.rstrip("/") == "https://www.betclic.fr":
+        current = self.page.url.rstrip("/")
+        if current in ("https://www.betclic.ci", "https://www.betclic.fr"):
             log.warning("Redirection vers la page d'accueil — session expirée ou jeu indisponible")
             raise SessionExpiredError(
                 f"Redirigé vers l'accueil depuis {game_url} — reconnexion nécessaire"
@@ -312,21 +307,27 @@ class ExampleSiteBot:
 
         while elapsed < timeout:
             for source in [self.page] + list(self.page.frames):
+                # Priorité 1 : écran de bienvenue → cliquer "Aller!" en premier
                 try:
-                    if await source.locator("#button_sound").count() > 0:
-                        if await source.locator("#button_sound").is_visible():
-                            log.info("Jeu déjà actif (#button_sound visible)")
-                            self._active_source = source
-                            return
+                    btn_go = source.locator("#button_go")
+                    if await btn_go.count() > 0 and await btn_go.is_visible():
+                        log.info("Écran de bienvenue détecté — clic sur 'Aller!'")
+                        await btn_go.click()
+                        self._active_source = source
+                        await source.wait_for_timeout(1000)
+                        return
                 except Exception:
                     pass
 
+                # Priorité 2 : jeu déjà actif ET pas de #button_go visible
                 try:
-                    btn = source.locator("#button_go")
-                    if await btn.count() > 0 and await btn.is_visible():
-                        log.info("Écran de bienvenue détecté — clic sur 'Aller!'")
-                        await btn.click()
-                        return
+                    btn_go_count = await source.locator("#button_go").count()
+                    btn_go_visible = btn_go_count > 0 and await source.locator("#button_go").is_visible()
+                    if not btn_go_visible and await source.locator("#button_sound").count() > 0:
+                        if await source.locator("#button_sound").is_visible():
+                            log.info("Jeu déjà actif (#button_sound visible, pas d'écran d'accueil)")
+                            self._active_source = source
+                            return
                 except Exception:
                     pass
 
@@ -398,6 +399,122 @@ class ExampleSiteBot:
             raise SessionExpiredError("Session expirée lors du scraping des multiplicateurs")
 
         raise RuntimeError("Multiplicateurs introuvables dans la page et les iframes")
+
+    # ------------------------------------------------------------------
+    # Placement automatique de la mise
+    # ------------------------------------------------------------------
+
+    async def place_bet(self, mise: int, cote: float, slot: int = 1) -> bool:
+        """
+        Place un pari pendant la phase de mise.
+        mise   : montant en FCFA (ex: 100)
+        cote   : multiplicateur d'auto cash-out (ex: 2.0)
+        slot   : emplacement de pari (1 ou 2)
+        Retourne True si le pari a bien été confirmé.
+        """
+        source = self._active_source
+        if source is None:
+            log.warning("place_bet: aucune source active, pari ignoré")
+            return False
+
+        btn_id     = f"#button_bet_{slot}"
+        input_id   = f"#bet_value_{slot}"
+        cb_id      = f"#cash_out_checkbox_{slot}"
+        cashout_id = f"#cash_out_input_{slot}"
+        cancel_id  = f"#button_cancel_{slot}"
+
+        try:
+            # --- 1. Attendre la phase de mise (bouton actif) ---
+            log.info("Attente de la phase de mise (%s)...", btn_id)
+            await source.wait_for_function(
+                f"() => {{ const b = document.querySelector('{btn_id}'); return b && !b.disabled; }}",
+                timeout=20_000,
+                polling=200,
+            )
+            log.info("Phase de mise ouverte")
+
+            # --- 2. Montant : via JS pour bypasser les event listeners Django/jQuery ---
+            set_ok = await source.evaluate(f"""(val) => {{
+                const inp = document.querySelector('{input_id}');
+                if (!inp) return false;
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(inp, val);
+                inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return inp.value === val;
+            }}""", str(mise))
+            log.info("Montant fixé via JS : %s (%s)", mise, "OK" if set_ok else "KO")
+
+            # Fallback : fill Playwright si JS n'a pas pris
+            if not set_ok:
+                bet_input = source.locator(input_id)
+                await bet_input.click()
+                await self.page.keyboard.press("Control+a")
+                await self.page.keyboard.type(str(mise))
+
+            # --- 3. Auto cash-out : activer la checkbox via JS (elle est hidden) ---
+            cb_enabled = await source.evaluate(f"""() => {{
+                const cb = document.querySelector('{cb_id}');
+                if (!cb) return false;
+                if (!cb.checked) {{
+                    // Clic sur le label associé s'il existe, sinon force le clic
+                    const lbl = document.querySelector('label[for="{cb_id}"]')
+                           || cb.closest('label')
+                           || cb.parentElement;
+                    if (lbl) lbl.click();
+                    else cb.click();
+                    cb.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+                return cb.checked;
+            }}""")
+            log.info("Auto cash-out checkbox : %s", "activée" if cb_enabled else "non trouvée/déjà active")
+
+            # Attendre que l'input cashout devienne visible après la checkbox
+            await source.wait_for_timeout(400)
+
+            # --- 4. Cote auto cash-out via JS ---
+            cote_str = f"{cote:.2f}"
+            cote_ok = await source.evaluate(f"""(val) => {{
+                const inp = document.querySelector('{cashout_id}');
+                if (!inp) return false;
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(inp, val);
+                inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
+                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return inp.value === val;
+            }}""", cote_str)
+            log.info("Cote cash-out fixée : %s (%s)", cote_str, "OK" if cote_ok else "KO")
+
+            # Fallback fill
+            if not cote_ok:
+                cashout_input = source.locator(cashout_id)
+                try:
+                    await cashout_input.wait_for(state="visible", timeout=2_000)
+                    await cashout_input.click()
+                    await self.page.keyboard.press("Control+a")
+                    await self.page.keyboard.type(cote_str)
+                except PlaywrightTimeoutError:
+                    log.warning("place_bet: #%s non visible — pari sans auto cash-out", cashout_id)
+
+            # --- 5. Clic sur le bouton MISE ---
+            await source.locator(btn_id).click()
+            await source.wait_for_timeout(700)
+
+            # --- 6. Vérification : le bouton ANNULER doit apparaître ---
+            cancel_visible = await source.locator(cancel_id).is_visible()
+            if cancel_visible:
+                log.info("Pari confirmé : %d FCFA @ %.2fx (slot %d)", mise, cote, slot)
+                return True
+
+            log.warning("place_bet: bouton ANNULER absent après clic — pari non confirmé")
+            return False
+
+        except PlaywrightTimeoutError:
+            log.warning("place_bet: timeout — phase de mise non atteinte dans les délais")
+            return False
+        except Exception as e:
+            log.error("place_bet: erreur inattendue — %s", e, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # Event-driven — attend le prochain résultat de round

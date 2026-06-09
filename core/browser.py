@@ -14,11 +14,13 @@ class BrowserManager:
 
     async def start(self):
         self.playwright = await async_playwright().start()
+        headless = os.getenv("HEADLESS", "true").lower() != "false"
         args = self.chromium_flags.split(" ") if self.chromium_flags else []
-        args.append("--headless=new")
+        if headless:
+            args.append("--headless=new")
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir="user_data",
-            headless=True,
+            headless=headless,
             args=args,
         )
 

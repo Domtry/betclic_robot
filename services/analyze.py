@@ -87,24 +87,22 @@ def generate_mise(analysis: dict) -> dict:
     if all(v < THRESHOLD for v in historic):
         return {
             "cote": 2.5,
-            "mise": 1000,
+            "mise": 100,
             "is_ready": True
         }
-        
+
     if all(v >= THRESHOLD for v in historic):
         return {
             "cote": 0,
             "mise": 0,
             "is_ready": False
-        }        
+        }
 
-    if cote > 2 :
-        mise = 150
-    elif cote >= 1.1:
-        mise = 500
+    if cote >= 1.1:
+        mise = 100
     else:
         mise = 0
-        
+
     return {
         "cote": cote,
         "mise": mise,
