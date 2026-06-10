@@ -337,13 +337,15 @@ class ExampleSiteBot:
         raise RuntimeError("Impossible de lancer le jeu dans le délai imparti (60s)")
 
     async def _wait_for_game_ready(self):
-        log.info("Attente du chargement complet du jeu (#button_sound)...")
+        log.info("Attente du chargement complet du jeu (#button_sound + historique)...")
         await self.page.wait_for_load_state("domcontentloaded")
 
-        timeout = 30000
+        timeout = 45000
         interval = 500
         elapsed = 0
+        source_found = None
 
+        # Étape 1 : attendre #button_sound
         while elapsed < timeout:
             for source in [self.page] + list(self.page.frames):
                 try:
@@ -351,15 +353,33 @@ class ExampleSiteBot:
                     if await btn.count() > 0:
                         await btn.wait_for(state="visible", timeout=5000)
                         self._active_source = source
-                        log.info("Jeu prêt (frame actif mis en cache)")
-                        return source
+                        source_found = source
+                        log.info("Jeu prêt (#button_sound visible)")
+                        break
                 except Exception:
                     continue
-
+            if source_found:
+                break
             await self.page.wait_for_timeout(interval)
             elapsed += interval
 
-        raise RuntimeError("Jeu pas encore chargé (#button_sound introuvable après 30s)")
+        if not source_found:
+            raise RuntimeError("Jeu pas encore chargé (#button_sound introuvable après 45s)")
+
+        # Étape 2 : attendre que #inGame-history contienne au moins une valeur
+        log.info("Attente de l'historique (#inGame-history)...")
+        for _ in range(20):   # jusqu'à 10 secondes
+            try:
+                result = await source_found.evaluate(self._JS_GET_MULTIPLIERS)
+                if result:
+                    log.info("Historique prêt (%d valeurs)", len(result))
+                    return source_found
+            except Exception:
+                pass
+            await self.page.wait_for_timeout(500)
+
+        log.warning("Historique non disponible après 10s — on continue quand même")
+        return source_found
 
     # ------------------------------------------------------------------
     # Scraping
@@ -404,110 +424,117 @@ class ExampleSiteBot:
     # Placement automatique de la mise
     # ------------------------------------------------------------------
 
-    async def place_bet(self, mise: int, cote: float, slot: int = 1) -> bool:
+    async def _get_darwin_frame(self):
+        """Retourne le frame Darwin actif, rafraîchit _active_source si nécessaire."""
+        # Tester le frame mis en cache
+        if self._active_source is not None:
+            try:
+                found = await self._active_source.evaluate(
+                    "() => !!document.querySelector('#bet_value_1')"
+                )
+                if found:
+                    return self._active_source
+            except Exception:
+                pass
+
+        log.info("_get_darwin_frame: frame périmé, recherche dans toutes les sources...")
+        self._active_source = None
+        for frame in [self.page] + list(self.page.frames):
+            try:
+                found = await frame.evaluate(
+                    "() => !!document.querySelector('#bet_value_1')"
+                )
+                if found:
+                    self._active_source = frame
+                    log.info("Darwin frame trouvé : %s", getattr(frame, 'url', 'page')[:70])
+                    return frame
+            except Exception:
+                continue
+
+        log.error("_get_darwin_frame: frame Darwin introuvable")
+        return None
+
+    async def place_bet(
+        self, mise: int, cote: float, slot: int = 1, skip_phase_wait: bool = False
+    ) -> bool:
         """
         Place un pari pendant la phase de mise.
-        mise   : montant en FCFA (ex: 100)
-        cote   : multiplicateur d'auto cash-out (ex: 2.0)
-        slot   : emplacement de pari (1 ou 2)
-        Retourne True si le pari a bien été confirmé.
+        mise             : montant en FCFA
+        cote             : multiplicateur d'auto cash-out
+        slot             : emplacement de pari (1 ou 2)
+        skip_phase_wait  : True pour slot 2 (la phase est déjà ouverte via slot 1)
         """
-        source = self._active_source
-        if source is None:
-            log.warning("place_bet: aucune source active, pari ignoré")
-            return False
-
         btn_id     = f"#button_bet_{slot}"
         input_id   = f"#bet_value_{slot}"
         cb_id      = f"#cash_out_checkbox_{slot}"
         cashout_id = f"#cash_out_input_{slot}"
         cancel_id  = f"#button_cancel_{slot}"
+        cote_str   = f"{cote:.2f}"
+
+        # --- 0. Valider / rafraîchir le frame Darwin ---
+        source = await self._get_darwin_frame()
+        if source is None:
+            log.error("place_bet slot%d: frame Darwin introuvable", slot)
+            return False
 
         try:
-            # --- 1. Attendre la phase de mise (bouton actif) ---
-            log.info("Attente de la phase de mise (%s)...", btn_id)
-            await source.wait_for_function(
-                f"() => {{ const b = document.querySelector('{btn_id}'); return b && !b.disabled; }}",
-                timeout=20_000,
-                polling=200,
-            )
-            log.info("Phase de mise ouverte")
+            # --- 1. Attendre la phase de mise (sauf si déjà confirmée pour slot 2) ---
+            if skip_phase_wait:
+                log.info("place_bet slot%d: phase confirmée par slot 1 — saisie directe", slot)
+            else:
+                log.info("place_bet slot%d: attente phase de mise...", slot)
+                await source.wait_for_function(
+                    f"() => {{ const b = document.querySelector('{btn_id}'); return b && !b.disabled; }}",
+                    timeout=90_000,
+                    polling=200,
+                )
+                log.info("place_bet slot%d: phase ouverte", slot)
 
-            # --- 2. Montant : via JS pour bypasser les event listeners Django/jQuery ---
-            set_ok = await source.evaluate(f"""(val) => {{
-                const inp = document.querySelector('{input_id}');
-                if (!inp) return false;
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, val);
-                inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
-                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return inp.value === val;
-            }}""", str(mise))
-            log.info("Montant fixé via JS : %s (%s)", mise, "OK" if set_ok else "KO")
+            # --- 2. Montant ---
+            log.info("place_bet: saisie montant %d FCFA", mise)
+            await source.locator(input_id).click()
+            await source.locator(input_id).fill(str(mise))
+            actual_mise = await source.locator(input_id).input_value()
+            log.info("place_bet: montant vérifié → %s", actual_mise)
 
-            # Fallback : fill Playwright si JS n'a pas pris
-            if not set_ok:
-                bet_input = source.locator(input_id)
-                await bet_input.click()
-                await self.page.keyboard.press("Control+a")
-                await self.page.keyboard.type(str(mise))
-
-            # --- 3. Auto cash-out : activer la checkbox via JS (elle est hidden) ---
-            cb_enabled = await source.evaluate(f"""() => {{
+            # --- 3. Activer auto cash-out (cl-switch grandparent) ---
+            log.info("place_bet: activation auto cash-out")
+            await source.evaluate(f"""() => {{
                 const cb = document.querySelector('{cb_id}');
-                if (!cb) return false;
-                if (!cb.checked) {{
-                    // Clic sur le label associé s'il existe, sinon force le clic
-                    const lbl = document.querySelector('label[for="{cb_id}"]')
-                           || cb.closest('label')
-                           || cb.parentElement;
-                    if (lbl) lbl.click();
-                    else cb.click();
-                    cb.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                if (cb && !cb.checked) {{
+                    const toggle = cb.closest('label') || cb.parentElement;
+                    if (toggle) toggle.click();
                 }}
-                return cb.checked;
             }}""")
-            log.info("Auto cash-out checkbox : %s", "activée" if cb_enabled else "non trouvée/déjà active")
+            await source.wait_for_timeout(600)
+            cb_state = await source.evaluate(f"() => document.querySelector('{cb_id}')?.checked")
+            log.info("place_bet: checkbox checked=%s", cb_state)
 
-            # Attendre que l'input cashout devienne visible après la checkbox
-            await source.wait_for_timeout(400)
-
-            # --- 4. Cote auto cash-out via JS ---
-            cote_str = f"{cote:.2f}"
-            cote_ok = await source.evaluate(f"""(val) => {{
-                const inp = document.querySelector('{cashout_id}');
-                if (!inp) return false;
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, val);
-                inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
-                inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return inp.value === val;
-            }}""", cote_str)
-            log.info("Cote cash-out fixée : %s (%s)", cote_str, "OK" if cote_ok else "KO")
-
-            # Fallback fill
-            if not cote_ok:
-                cashout_input = source.locator(cashout_id)
-                try:
-                    await cashout_input.wait_for(state="visible", timeout=2_000)
-                    await cashout_input.click()
-                    await self.page.keyboard.press("Control+a")
-                    await self.page.keyboard.type(cote_str)
-                except PlaywrightTimeoutError:
-                    log.warning("place_bet: #%s non visible — pari sans auto cash-out", cashout_id)
+            # --- 4. Cote auto cash-out ---
+            log.info("place_bet: saisie cote %s", cote_str)
+            cashout = source.locator(cashout_id)
+            try:
+                await cashout.wait_for(state="visible", timeout=2_000)
+                await cashout.click()
+                await cashout.fill(cote_str)
+                actual_cote = await cashout.input_value()
+                log.info("place_bet: cote vérifiée → %s", actual_cote)
+            except PlaywrightTimeoutError:
+                log.warning("place_bet: cashout input non visible — cote non fixée")
 
             # --- 5. Clic sur le bouton MISE ---
+            log.info("place_bet: clic sur le bouton MISE")
             await source.locator(btn_id).click()
-            await source.wait_for_timeout(700)
+            await source.wait_for_timeout(800)
 
-            # --- 6. Vérification : le bouton ANNULER doit apparaître ---
-            cancel_visible = await source.locator(cancel_id).is_visible()
-            if cancel_visible:
-                log.info("Pari confirmé : %d FCFA @ %.2fx (slot %d)", mise, cote, slot)
-                return True
-
-            log.warning("place_bet: bouton ANNULER absent après clic — pari non confirmé")
-            return False
+            # --- 6. Vérification : bouton ANNULER visible = pari accepté ---
+            confirmed = await source.locator(cancel_id).is_visible()
+            log.info("place_bet: pari confirmé=%s", confirmed)
+            if confirmed:
+                log.info("Pari placé : %d FCFA @ %s (slot %d)", mise, cote_str, slot)
+            else:
+                log.warning("place_bet: bouton ANNULER absent — pari non confirmé")
+            return confirmed
 
         except PlaywrightTimeoutError:
             log.warning("place_bet: timeout — phase de mise non atteinte dans les délais")
@@ -548,12 +575,18 @@ class ExampleSiteBot:
 
     async def _race_wait(self, source, last_raw: str, timeout: int) -> None:
         async def _do_wait():
-            await source.wait_for_function(
-                self._JS_WAIT_NEW_RESULT,
-                arg=last_raw,
-                timeout=timeout,
-                polling=200,
-            )
+            try:
+                await source.wait_for_function(
+                    self._JS_WAIT_NEW_RESULT,
+                    arg=last_raw,
+                    timeout=timeout,
+                    polling=200,
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if any(k in msg for k in ("detached", "closed", "destroyed", "target")):
+                    raise RuntimeError(f"Frame invalide pendant l'attente : {e}") from e
+                raise
 
         async def _watch_session():
             await self._session_expired.wait()

@@ -93,14 +93,25 @@ def generate_session_chart(
     buf.seek(0)
     image_bytes = buf.read()
 
+    from services.analyze import analyze as _analyze, generate_mise as _generate_mise
+    _analysis  = _analyze(list(reversed(last_n)))   # remettre en ordre décroissant
+    _mise_info = _generate_mise(_analysis)
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     caption = (
         f"📊 <b>Rapport {n} parties — {timestamp}</b>\n"
-        f"├ Min    : <code>{v_min}x</code>\n"
-        f"├ Max    : <code>{v_max}x</code>\n"
-        f"├ Moy.   : <code>{v_mean}x</code>\n"
-        f"├ ≥ 2.0x : {count_ge2}/{n} ({pct_ge2}%)\n"
-        f"├ Tendance : {tendance}\n"
+        f"├ Min       : <code>{v_min}x</code>\n"
+        f"├ Max       : <code>{v_max}x</code>\n"
+        f"├ Moy.      : <code>{v_mean}x</code>\n"
+        f"├ ≥ 2.0x    : {count_ge2}/{n} ({pct_ge2}%)\n"
+        f"├ Tendance  : {tendance}\n"
+        f"├─────────────────────────\n"
+        f"├ 🎯 Cote conseillée : <code>{_mise_info['cote']}x</code>\n"
+        f"├ 💰 Mise conseillée : <code>{_mise_info['mise']} FCFA</code>\n"
+        f"├ 📉 Série basse     : {_mise_info['streak_low']} consécutif(s)\n"
+        f"├ 📈 Série haute     : {_mise_info['streak_high']} consécutif(s)\n"
+        f"├ Moy(10)   : <code>{_mise_info['moyenne_10']}x</code>\n"
+        f"├ Raison    : {_mise_info['raison']}\n"
         f"└ Partie n°{bet_count}"
     )
     return image_bytes, caption
@@ -143,8 +154,10 @@ def generate_daily_report(
     plt.savefig(chart_path)
     plt.close()
 
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary = [
         f"Rapport quotidien — {day}",
+        f"Généré le : {generated_at}",
         f"Nombre de résultats: {len(values)}",
         f"Probabilité historique >= 2.0x: {prediction['probability_next_ge_target']}",
         f"Probabilité récente >= 2.0x: {prediction.get('recent_probability_ge_target', 0)}",
@@ -239,8 +252,10 @@ def generate_hourly_report(
     plt.savefig(chart_path)
     plt.close()
 
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary = [
         f"Rapport horaire — {hour_str}",
+        f"Généré le : {generated_at}",
         f"Nombre de résultats: {len(values)}",
         f"Probabilité historique >= 2.0x: {prediction['probability_next_ge_target']}",
         f"Probabilité récente >= 2.0x: {prediction.get('recent_probability_ge_target', 0)}",

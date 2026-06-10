@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from modules.example_site import ExampleSiteBot, SessionExpiredError
 from core.browser import BrowserManager
 from core.logger import get_logger
 import asyncio
+import html
 import os
 from dotenv import load_dotenv
 
@@ -25,8 +26,8 @@ TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")
 TELEGRAM_BOT_NAME = os.getenv("TELEGRAM_BOT_NAME")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-MAX_REAUTH_ATTEMPTS = 3
-REPORT_EVERY_N_BETS = 5
+MAX_REAUTH_ATTEMPTS  = 3
+REPORT_EVERY_N_BETS  = 5
 
 
 class BotService:
@@ -51,11 +52,21 @@ class BotService:
             await bot.open_game(GAME_URL)
 
             log.info("Premier scrape des multiplicateurs")
-            multipliers = await bot.get_multipliers()
+            multipliers = None
+            for attempt in range(1, 6):
+                try:
+                    multipliers = await bot.get_multipliers()
+                    break
+                except RuntimeError as e:
+                    log.warning("get_multipliers échoué (tentative %d/5) : %s", attempt, e)
+                    if attempt < 5:
+                        await asyncio.sleep(3)
+                    else:
+                        raise
             saved = self.store.save_multipliers(multipliers)
             log.info("%d nouveaux multiplicateurs sauvegardés en base", saved)
             reauth_attempts = 0
-            bet_count = 0
+            bet_count       = 0
 
             log.info("=== Boucle principale démarrée ===")
             while True:
@@ -79,34 +90,63 @@ class BotService:
                     )
 
                     await notifier.envoyer(
-                        f"🎯 <b>Nouveau Paris - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
+                        f"🎯 <b>Nouveau Paris — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
                         f"├ Jeu           : Circuit Masters\n"
-                        f"├ Tendance      : {analysis['tendance_recente']}\n"
-                        f"├ Historique    : {analysis['historique_recent']}\n"
-                        f"├ Nouvelle côte : <code>{mise['cote']}</code>\n"
-                        f"├ Ancienne côte : <code>{ancienne_cote}</code>\n"
-                        f"├ Mise suggérée : <code>{mise['mise']} FCFA</code>\n"
-                        f"├ Décision      : {'✅ OPPORT. À SAISIR' if mise['is_ready'] else '⛔ RISQUE ÉLEVÉ'}\n"
-                        f"│\n"
-                        f"├ ⚠️ Remarque :\n"
-                        f"├ Analyse basée sur des probabilités \n"
-                        f"├ statistiques. Les résultats restent \n"
-                        f"├ imprévisibles (RNG) les résultats \n"
-                        f"└ Gérer votre mise avec prudence\n"
+                        f"├ Tendance      : {html.escape(analysis['tendance_recente'], quote=False)}\n"
+                        f"├ Historique(5) : {html.escape(str(analysis['historique_recent']), quote=False)}\n"
+                        f"├─────────────────────────\n"
+                        f"├ Cote cible    : <code>{mise['cote']}x</code>\n"
+                        f"├ Mise          : <code>{mise['mise']} FCFA</code>\n"
+                        f"├ Série basse   : {mise['streak_low']} consécutif(s)\n"
+                        f"├ Série haute   : {mise['streak_high']} consécutif(s)\n"
+                        f"├ Moy(10)       : <code>{mise['moyenne_10']}x</code>\n"
+                        f"├ Raison        : {html.escape(mise['raison'], quote=False)}\n"
+                        f"├─────────────────────────\n"
+                        + (f"├ ⚠️ PIC IGNORÉ — mise réduite au minimum\n" if mise.get('spike') else "")
+                        + f"└ Décision : {'✅ PARI PLACÉ' if mise['is_ready'] else '⛔ AUCUN PARI'}\n"
                     )
 
-                    cote_jouee = mise["cote"]
+                    cote_jouee    = mise["cote"]
                     voulait_miser = mise["is_ready"]
-                    montant_mise = mise["mise"]
-                    pari_place = False
+                    montant_mise  = mise["mise"]
+                    pari_place    = False
+                    pari_place_s2 = False
 
                     if voulait_miser:
-                        pari_place = await bot.place_bet(montant_mise, cote_jouee)
+                        try:
+                            pari_place = await asyncio.wait_for(
+                                bot.place_bet(montant_mise, cote_jouee, slot=1),
+                                timeout=100,
+                            )
+                        except asyncio.TimeoutError:
+                            log.warning("place_bet slot1 timeout (100s) — pari ignoré")
+                            pari_place = False
                         if not pari_place:
-                            log.warning("Pari non placé — on continue sans mise cette partie")
+                            log.warning("Slot 1 : pari non placé")
+
+                    # Slot 2 — super multiplicateur (skip_phase_wait : déjà dans la phase)
+                    if mise.get("slot2_ready"):
+                        s2_cote = mise["slot2_cote"]
+                        s2_mise = mise["slot2_mise"]
+                        log.info("Slot 2 : super-mult @%.1fx mise=%dF", s2_cote, s2_mise)
+                        try:
+                            pari_place_s2 = await asyncio.wait_for(
+                                bot.place_bet(s2_mise, s2_cote, slot=2, skip_phase_wait=True),
+                                timeout=20,
+                            )
+                        except asyncio.TimeoutError:
+                            log.warning("place_bet slot2 timeout (20s) — ignoré")
+                        if pari_place_s2:
+                            log.info("Slot 2 confirmé : %dF @ %.1fx", s2_mise, s2_cote)
 
                     last_raw = multipliers[0]["raw"] if multipliers else ""
-                    await bot.wait_for_new_result(last_raw)
+                    try:
+                        await asyncio.wait_for(
+                            bot.wait_for_new_result(last_raw),
+                            timeout=180,
+                        )
+                    except asyncio.TimeoutError:
+                        raise RuntimeError("wait_for_new_result timeout (180s) — frame probablement invalide")
 
                     multipliers = await bot.get_multipliers()
                     saved = self.store.save_multipliers(multipliers)
@@ -154,6 +194,7 @@ class BotService:
                         image_bytes, caption = generate_session_chart(multipliers, bet_count, history=30)
                         await notifier.envoyer_photo(image_bytes, caption)
 
+
                 except SessionExpiredError as e:
                     reauth_attempts += 1
                     log.warning(
@@ -174,3 +215,21 @@ class BotService:
                     multipliers = await bot.get_multipliers()
                     saved = self.store.save_multipliers(multipliers)
                     log.info("%d nouveaux multiplicateurs sauvegardés en base après reconnexion", saved)
+
+                except RuntimeError as e:
+                    # Frame Darwin invalide ou jeu déconnecté — réouverture sans reconnexion
+                    log.warning("Erreur jeu : %s — tentative de réouverture...", e)
+                    try:
+                        await bot.open_game(GAME_URL)
+                        multipliers = await bot.get_multipliers()
+                        saved = self.store.save_multipliers(multipliers)
+                        log.info("Jeu réouvert — %d multiplicateurs récupérés, reprise de la boucle", saved)
+                    except SessionExpiredError:
+                        log.warning("Session expirée lors de la réouverture — reconnexion complète")
+                        await bot.refresh_session(USERNAME, PASSWORD, DATE_OF_BIRTH, GAME_URL)
+                        multipliers = await bot.get_multipliers()
+                        saved = self.store.save_multipliers(multipliers)
+                        log.info("%d multiplicateurs récupérés après reconnexion", saved)
+                    except Exception as reopen_err:
+                        log.error("Impossible de rouvrir le jeu : %s — arrêt", reopen_err)
+                        raise
