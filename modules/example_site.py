@@ -382,6 +382,24 @@ class ExampleSiteBot:
         return source_found
 
     # ------------------------------------------------------------------
+    # Solde du portefeuille
+    # ------------------------------------------------------------------
+
+    async def get_balance(self) -> str:
+        """Retourne le solde du compte (ex : '388 F'). 'N/A' si indisponible."""
+        try:
+            el = self.page.locator('[data-qa="commonDeposit"]').first
+            text = await el.inner_text(timeout=3000)
+            return text.replace('\xa0', ' ').strip()
+        except Exception:
+            try:
+                el = self.page.locator('.header_walletBalance').first
+                text = await el.inner_text(timeout=2000)
+                return text.replace('\xa0', ' ').strip()
+            except Exception:
+                return "N/A"
+
+    # ------------------------------------------------------------------
     # Scraping
     # ------------------------------------------------------------------
 

@@ -89,14 +89,23 @@ class BotService:
                         else "N/A"
                     )
 
+                    solde = await bot.get_balance()
+
+                    slot2_info = (
+                        f"├ Slot 2        : <code>{mise['slot2_cote']}x</code> — {mise['slot2_mise']} FCFA\n"
+                        if mise.get("slot2_ready") else ""
+                    )
+
                     await notifier.envoyer(
                         f"🎯 <b>Nouveau Paris — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
                         f"├ Jeu           : Circuit Masters\n"
+                        f"├ 💰 Solde       : <b>{html.escape(solde, quote=False)}</b>\n"
                         f"├ Tendance      : {html.escape(analysis['tendance_recente'], quote=False)}\n"
                         f"├ Historique(5) : {html.escape(str(analysis['historique_recent']), quote=False)}\n"
                         f"├─────────────────────────\n"
                         f"├ Cote cible    : <code>{mise['cote']}x</code>\n"
                         f"├ Mise          : <code>{mise['mise']} FCFA</code>\n"
+                        f"{slot2_info}"
                         f"├ Série basse   : {mise['streak_low']} consécutif(s)\n"
                         f"├ Série haute   : {mise['streak_high']} consécutif(s)\n"
                         f"├ Moy(10)       : <code>{mise['moyenne_10']}x</code>\n"
@@ -156,15 +165,17 @@ class BotService:
 
                     result_value = float(multipliers[0]["value"]) if multipliers else None
                     if result_value is not None and voulait_miser:
+                        solde_apres = await bot.get_balance()
                         log.info(
-                            "Résultat — valeur=%.2f | cote=%.2f | placé=%s",
-                            result_value, cote_jouee, pari_place,
+                            "Résultat — valeur=%.2f | cote=%.2f | placé=%s | solde=%s",
+                            result_value, cote_jouee, pari_place, solde_apres,
                         )
                         if not pari_place:
                             await notifier.envoyer(
                                 f"⚠️ <b>Pari non placé</b>\n"
                                 f"├ Résultat sorti : <code>{result_value}x</code>\n"
                                 f"├ Cote visée     : <code>{cote_jouee}x</code>\n"
+                                f"├ 💰 Solde        : <b>{html.escape(solde_apres, quote=False)}</b>\n"
                                 f"└ Le bot n'a pas pu miser à temps"
                             )
                         else:
@@ -178,7 +189,8 @@ class BotService:
                                     f"├ Cote jouée     : <code>{cote_jouee}x</code>\n"
                                     f"├ Mise           : <code>{montant_mise} FCFA</code>\n"
                                     f"├ Gain brut      : <code>+{gain_brut} FCFA</code>\n"
-                                    f"└ Bénéfice net   : <code>+{benefice} FCFA</code>"
+                                    f"├ Bénéfice net   : <code>+{benefice} FCFA</code>\n"
+                                    f"└ 💰 Solde        : <b>{html.escape(solde_apres, quote=False)}</b>"
                                 )
                             else:
                                 await notifier.envoyer(
@@ -186,7 +198,8 @@ class BotService:
                                     f"├ Résultat sorti : <code>{result_value}x</code>\n"
                                     f"├ Cote jouée     : <code>{cote_jouee}x</code>\n"
                                     f"├ Mise           : <code>{montant_mise} FCFA</code>\n"
-                                    f"└ Perte          : <code>-{montant_mise} FCFA</code>"
+                                    f"├ Perte          : <code>-{montant_mise} FCFA</code>\n"
+                                    f"└ 💰 Solde        : <b>{html.escape(solde_apres, quote=False)}</b>"
                                 )
 
                     if bet_count % REPORT_EVERY_N_BETS == 0:
