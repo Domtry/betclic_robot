@@ -91,11 +91,6 @@ class BotService:
 
                     solde = await bot.get_balance()
 
-                    slot2_info = (
-                        f"├ Slot 2        : <code>{mise['slot2_cote']}x</code> — {mise['slot2_mise']} FCFA\n"
-                        if mise.get("slot2_ready") else ""
-                    )
-
                     await notifier.envoyer(
                         f"🎯 <b>Nouveau Paris — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</b>\n"
                         f"├ Jeu           : Circuit Masters\n"
@@ -105,7 +100,6 @@ class BotService:
                         f"├─────────────────────────\n"
                         f"├ Cote cible    : <code>{mise['cote']}x</code>\n"
                         f"├ Mise          : <code>{mise['mise']} FCFA</code>\n"
-                        f"{slot2_info}"
                         f"├ Série basse   : {mise['streak_low']} consécutif(s)\n"
                         f"├ Série haute   : {mise['streak_high']} consécutif(s)\n"
                         f"├ Moy(10)       : <code>{mise['moyenne_10']}x</code>\n"
@@ -119,34 +113,18 @@ class BotService:
                     voulait_miser = mise["is_ready"]
                     montant_mise  = mise["mise"]
                     pari_place    = False
-                    pari_place_s2 = False
 
                     if voulait_miser:
                         try:
                             pari_place = await asyncio.wait_for(
-                                bot.place_bet(montant_mise, cote_jouee, slot=1),
+                                bot.place_bet(montant_mise, cote_jouee),
                                 timeout=100,
                             )
                         except asyncio.TimeoutError:
-                            log.warning("place_bet slot1 timeout (100s) — pari ignoré")
+                            log.warning("place_bet timeout (100s) — pari ignoré")
                             pari_place = False
                         if not pari_place:
-                            log.warning("Slot 1 : pari non placé")
-
-                    # Slot 2 — super multiplicateur (skip_phase_wait : déjà dans la phase)
-                    if mise.get("slot2_ready"):
-                        s2_cote = mise["slot2_cote"]
-                        s2_mise = mise["slot2_mise"]
-                        log.info("Slot 2 : super-mult @%.1fx mise=%dF", s2_cote, s2_mise)
-                        try:
-                            pari_place_s2 = await asyncio.wait_for(
-                                bot.place_bet(s2_mise, s2_cote, slot=2, skip_phase_wait=True),
-                                timeout=20,
-                            )
-                        except asyncio.TimeoutError:
-                            log.warning("place_bet slot2 timeout (20s) — ignoré")
-                        if pari_place_s2:
-                            log.info("Slot 2 confirmé : %dF @ %.1fx", s2_mise, s2_cote)
+                            log.warning("Pari non placé")
 
                     last_raw = multipliers[0]["raw"] if multipliers else ""
                     try:
